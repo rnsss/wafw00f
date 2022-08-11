@@ -22,6 +22,9 @@ from wafw00f import __version__, __license__
 from wafw00f.manager import load_plugins
 from wafw00f.wafprio import wafdetectionsprio
 from wafw00f.lib.evillib import urlParser, waftoolsengine, def_headers
+from threading import Thread
+from queue import Queue
+from openpyxl import Workbook
 
 
 class WAFW00F(waftoolsengine):
@@ -317,6 +320,62 @@ def getheaders(fn):
 class RequestBlocked(Exception):
     pass
 
+def handle_input(log, target_queue, options, extraheaders, results):
+    while True:
+        try:
+            target = target_queue.get()
+            if not target.startswith('http'):
+                log.info('The url %s should start with http:// or https:// .. fixing (might make this unusable)' % target)
+                target = 'https://' + target
+            # print('[*] Checking %s' % target)
+            pret = urlParser(target)
+            if pret is None:
+                log.critical('The url %s is not well formed' % target)
+                continue
+            (hostname, _, path, _, _) = pret
+            # log.info('starting wafw00f on %s' % target)
+            proxies = dict()
+            if options.proxy:
+                proxies = {
+                    "http": options.proxy,
+                    "https": options.proxy,
+                }
+            attacker = WAFW00F(target, debuglevel=options.verbose, path=path,
+                        followredirect=options.followredirect, extraheaders=extraheaders,
+                            proxies=proxies)
+            if attacker.rq is None:
+                log.error('Site %s appears to be down' % hostname)
+                continue
+            if options.test:
+                if options.test in attacker.wafdetections:
+                    waf = attacker.wafdetections[options.test](attacker)
+                    if waf:
+                        print('[+] The site %s%s%s is behind %s%s%s WAF.' % (B, target, E, C, options.test, E))
+                    else:
+                        print('[-] WAF %s was not detected on %s' % (options.test, target))
+                else:
+                    print('[-] WAF %s was not found in our list\r\nUse the --list option to see what is available' % options.test)
+                return
+            waf = attacker.identwaf(options.findall)
+            log.info('Identified WAF: %s' % waf)
+            if len(waf) > 0:
+                for i in waf:
+                    results.append(buildResultRecord(target, i))
+                print('[+] The site %s%s%s is behind %s%s%s WAF.' % (B, target, E, C, (E+' and/or '+C).join(waf), E))
+            if (options.findall) or len(waf) == 0:
+                # print('[+] Generic Detection results:')
+                if attacker.genericdetect():
+                    # log.info('Generic Detection: %s' % attacker.knowledge['generic']['reason'])
+                    print('[*] The site %s seems to be behind a WAF or some sort of security solution' % target)
+                    # print('[~] Reason: %s' % attacker.knowledge['generic']['reason'])
+                    results.append(buildResultRecord(target, 'generic'))
+                else:
+                    print('[-] No WAF detected by the generic detection')
+                    results.append(buildResultRecord(target, None))
+            # print('[~] Number of requests: %s' % attacker.requestnumber)
+        finally:
+            target_queue.task_done()
+
 def main():
     parser = OptionParser(usage='%prog url1 [url2 [url3 ... ]]\r\nexample: %prog http://www.victim.org/')
     parser.add_option('-v', '--verbose', action='count', dest='verbose', default=0,
@@ -406,57 +465,15 @@ def main():
             sys.exit(1)
     else:
         targets = args
-    results = []
+    target_queue = Queue()
     for target in targets:
-        if not target.startswith('http'):
-            log.info('The url %s should start with http:// or https:// .. fixing (might make this unusable)' % target)
-            target = 'https://' + target
-        print('[*] Checking %s' % target)
-        pret = urlParser(target)
-        if pret is None:
-            log.critical('The url %s is not well formed' % target)
-            sys.exit(1)
-        (hostname, _, path, _, _) = pret
-        log.info('starting wafw00f on %s' % target)
-        proxies = dict()
-        if options.proxy:
-            proxies = {
-                "http": options.proxy,
-                "https": options.proxy,
-            }
-        attacker = WAFW00F(target, debuglevel=options.verbose, path=path,
-                    followredirect=options.followredirect, extraheaders=extraheaders,
-                        proxies=proxies)
-        if attacker.rq is None:
-            log.error('Site %s appears to be down' % hostname)
-            continue
-        if options.test:
-            if options.test in attacker.wafdetections:
-                waf = attacker.wafdetections[options.test](attacker)
-                if waf:
-                    print('[+] The site %s%s%s is behind %s%s%s WAF.' % (B, target, E, C, options.test, E))
-                else:
-                    print('[-] WAF %s was not detected on %s' % (options.test, target))
-            else:
-                print('[-] WAF %s was not found in our list\r\nUse the --list option to see what is available' % options.test)
-            return
-        waf = attacker.identwaf(options.findall)
-        log.info('Identified WAF: %s' % waf)
-        if len(waf) > 0:
-            for i in waf:
-                results.append(buildResultRecord(target, i))
-            print('[+] The site %s%s%s is behind %s%s%s WAF.' % (B, target, E, C, (E+' and/or '+C).join(waf), E))
-        if (options.findall) or len(waf) == 0:
-            print('[+] Generic Detection results:')
-            if attacker.genericdetect():
-                log.info('Generic Detection: %s' % attacker.knowledge['generic']['reason'])
-                print('[*] The site %s seems to be behind a WAF or some sort of security solution' % target)
-                print('[~] Reason: %s' % attacker.knowledge['generic']['reason'])
-                results.append(buildResultRecord(target, 'generic'))
-            else:
-                print('[-] No WAF detected by the generic detection')
-                results.append(buildResultRecord(target, None))
-        print('[~] Number of requests: %s' % attacker.requestnumber)
+        target_queue.put(target)
+    results = []
+    for i in range(50):
+        t = Thread(target=handle_input, args=(log, target_queue, options, extraheaders, results))
+        t.daemon = True
+        t.start()
+    target_queue.join()
     #print table of results
     if len(results) > 0:
         log.info("Found: %s matches." % (len(results)))
@@ -493,6 +510,16 @@ def main():
                         csvwriter.writerow(header)
                         count += 1
                     csvwriter.writerow(result.values())
+        elif options.output.endswith('.xlsx'):
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["url", "detected", "firewall", "manufacturer"])
+            for result in results:
+                result_list = []
+                for k, v in result.items():
+                    result_list.append(v)
+                ws.append(result_list)
+            wb.save(options.output)
         else:
             log.debug("Exporting data in text format to file: %s" % (options.output))
             if options.format == 'json':
