@@ -385,7 +385,7 @@ def main():
     parser.add_option('-r', '--noredirect', action='store_false', dest='followredirect',
                       default=True, help='Do not follow redirections given by 3xx responses')
     parser.add_option('-t', '--test', dest='test', help='Test for one specific WAF')
-    parser.add_option('-o', '--output', dest='output', help='Write output to csv, json or text file depending on file extension. For stdout, specify - as filename.',
+    parser.add_option('-o', '--output', dest='output', help='Write output to csv, json, xlsx or text file depending on file extension. For stdout, specify - as filename.',
                       default=None)
     parser.add_option('-f', '--format', dest='format', help='Force output format to csv, json or text.',
                       default=None)
@@ -399,6 +399,8 @@ def main():
                       default=False, help='Print out the current version of WafW00f and exit.')
     parser.add_option('--headers', '-H', dest='headers', action='store', default=None,
                       help='Pass custom headers via a text file to overwrite the default header set.')
+    parser.add_option('-T', '--threads', dest='threads', action='store', default=50,
+                      help='线程数，默认50。', type=int)
     options, args = parser.parse_args()
     logging.basicConfig(level=calclogginglevel(options.verbose))
     log = logging.getLogger('wafw00f')
@@ -469,7 +471,7 @@ def main():
     for target in targets:
         target_queue.put(target)
     results = []
-    for i in range(50):
+    for i in range(options.threads):
         t = Thread(target=handle_input, args=(log, target_queue, options, extraheaders, results))
         t.daemon = True
         t.start()
